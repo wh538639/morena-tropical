@@ -141,7 +141,7 @@ nav.tabbar button.activo { color: var(--purple-dark); background: rgba(155,63,19
 .campo label { display:block; font-size:12.5px; color: var(--text-dim); margin-bottom:5px; }
 .campo input, .campo select, .campo textarea {
     width:100%; padding:10px 12px; border-radius:10px; border:1px solid var(--border);
-    background:#fff; color: var(--text); font-size:14px;
+    background:#fff; color: var(--text); font-size:16px;
 }
 .campo textarea { resize: vertical; min-height:60px; }
 .seg {
@@ -349,6 +349,10 @@ input[type=file].file-btn { display:none; }
         </div>
         <div class="campo"><label>Descripción (opcional)</label><textarea id="prodDescripcion" placeholder="Talla, tela, detalles…"></textarea></div>
         <button class="btn ancho" onclick="guardarProducto()">Guardar producto</button>
+        <div id="accionesProductoExistente" class="oculta" style="display:flex; gap:10px; margin-top:10px;">
+            <button class="btn secundario" style="flex:1;" onclick="toggleActivoProducto()" id="btnToggleActivo">Descontinuar</button>
+            <button class="btn peligro" style="flex:1;" onclick="eliminarProducto()">🗑️ Eliminar</button>
+        </div>
     </div></div>
 
     <!-- Nueva venta -->
@@ -497,6 +501,24 @@ let tipoPagoActual = 'contado', monedaVentaActual = 'USD', monedaAbonoActual = '
 let fotoProductoBase64 = null;
 let filtroVentaActual = 'todas';
 let facturaActual = null;
+let logoBase64 = null;
+
+// Precarga el logo como base64 para poder incrustarlo en los PDFs (factura y catálogo)
+async function cargarLogoBase64() {
+    try {
+        const resp = await fetch('./logo.png');
+        const blob = await resp.blob();
+        logoBase64 = await new Promise((res, rej) => {
+            const reader = new FileReader();
+            reader.onload = () => res(reader.result);
+            reader.onerror = rej;
+            reader.readAsDataURL(blob);
+        });
+    } catch (e) {
+        console.warn('No se pudo precargar el logo para los PDFs:', e);
+        logoBase64 = null;
+    }
+}
 
 // ── Helper de API (rutas relativas → Cloudflare Pages Functions) ──
 async function api(path, options = {}) {
@@ -528,7 +550,7 @@ window.addEventListener('load', async () => {
         navigator.serviceWorker.register('./sw.js').catch(() => {});
     }
     try {
-        await Promise.all([cargarTasa(), cargarProductos(), cargarVentas(), cargarEgresos(), cargarFacturas()]);
+        await Promise.all([cargarTasa(), cargarProductos(), cargarVentas(), cargarEgresos(), cargarFacturas(), cargarLogoBase64()]);
     } catch (e) {
         console.error(e);
         toast('No se pudo conectar con el servidor');
@@ -537,6 +559,27 @@ window.addEventListener('load', async () => {
     document.getElementById('splash').classList.add('oculta');
     document.getElementById('app').style.display = 'block';
     actualizarBotonPush();
+});
+
+// ── Fix zoom/viewport: en iOS, si un input tiene fuente <16px, Safari
+// hace zoom-in automático al enfocarlo y luego no vuelve a su posición
+// (deja el layout "roto"). Ya subimos la fuente a 16px, pero además
+// bloqueamos el pinch-zoom SOLO mientras hay un campo enfocado, y lo
+// restauramos apenas se cierra el teclado, para que la app siempre
+// vuelva a quedar ajustada a la pantalla, sea PWA o navegador. ──
+const metaViewport = document.querySelector('meta[name=viewport]');
+function bloquearZoom() {
+    metaViewport.setAttribute('content', 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover');
+}
+function restaurarZoom() {
+    metaViewport.setAttribute('content', 'width=device-width, initial-scale=1, viewport-fit=cover');
+    window.scrollTo(0, 0);
+}
+document.addEventListener('focusin', e => {
+    if (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName)) bloquearZoom();
+});
+document.addEventListener('focusout', e => {
+    if (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName)) setTimeout(restaurarZoom, 50);
 });
 
 // ── Navegación por pestañas ──
@@ -633,6 +676,12 @@ function renderInicio() {
         </div>`).join('');
 }
 
+function formatoImagenPDF(dataUrl) {
+    if (!dataUrl) return 'JPEG';
+    if (dataUrl.startsWith('data:image/png')) return 'PNG';
+    if (dataUrl.startsWith('data:image/webp')) return 'WEBP';
+    return 'JPEG';
+}
 function fotoHtml(p) {
     return p.imagen_url ? `<img class="foto" src="${p.imagen_url}">` : `<div class="foto-vacia">👗</div>`;
 }
@@ -675,6 +724,7 @@ function abrirNuevoProducto() {
     ['prodNombre','prodCategoria','prodSku','prodPrecio','prodCosto','prodStock','prodStockMinimo','prodDescripcion'].forEach(id => document.getElementById(id).value = '');
     fotoProductoBase64 = null;
     document.getElementById('fotoPickerPreview').innerHTML = '<span id="fotoPickerTexto">📷 Toca para elegir foto</span>';
+    document.getElementById('accionesProductoExistente').classList.add('oculta');
     mostrarModal('modalProducto');
 }
 function abrirEditarProducto(id) {
@@ -692,7 +742,36 @@ function abrirEditarProducto(id) {
     document.getElementById('prodDescripcion').value = p.descripcion || '';
     fotoProductoBase64 = p.imagen_url || null;
     document.getElementById('fotoPickerPreview').innerHTML = p.imagen_url ? `<img src="${p.imagen_url}">` : '<span>📷 Toca para elegir foto</span>';
+    document.getElementById('accionesProductoExistente').classList.remove('oculta');
+    document.getElementById('btnToggleActivo').textContent = p.activo === false ? '✅ Reactivar' : '⏸️ Descontinuar';
     mostrarModal('modalProducto');
+}
+async function eliminarProducto() {
+    const id = document.getElementById('prodId').value;
+    if (!id) return;
+    const p = productos.find(x => x.id === id);
+    if (!confirm(`¿Eliminar "${p ? p.nombre : 'este producto'}" definitivamente? Esta acción no se puede deshacer.`)) return;
+    try {
+        await api('/productos?id=' + id, { method: 'DELETE' });
+        toast('Producto eliminado');
+        cerrarModal('modalProducto');
+        await cargarProductos();
+        renderInventario(); renderInicio(); llenarSelectProductos();
+    } catch (e) { toast('Error: ' + e.message); }
+}
+async function toggleActivoProducto() {
+    const id = document.getElementById('prodId').value;
+    if (!id) return;
+    const p = productos.find(x => x.id === id);
+    if (!p) return;
+    const nuevoActivo = p.activo === false ? true : false;
+    try {
+        await api('/productos?id=' + id, { method: 'PATCH', body: JSON.stringify({ activo: nuevoActivo }) });
+        toast(nuevoActivo ? 'Producto reactivado' : 'Producto descontinuado');
+        cerrarModal('modalProducto');
+        await cargarProductos();
+        renderInventario(); renderInicio(); llenarSelectProductos();
+    } catch (e) { toast('Error: ' + e.message); }
 }
 function previsualizarFoto(ev) {
     const file = ev.target.files?.[0];
@@ -1098,10 +1177,14 @@ async function compartirFacturaWhatsApp() {
 function generarPDFFactura(f) {
     const { jsPDF } = window.jspdf;
     const doc = new jsPDF();
+    const offsetX = logoBase64 ? 32 : 14;
+    if (logoBase64) {
+        try { doc.addImage(logoBase64, 'PNG', 14, 10, 20, 20); } catch (e) { console.warn('No se pudo insertar el logo:', e); }
+    }
     doc.setFont('helvetica', 'bold'); doc.setFontSize(18); doc.setTextColor(139, 63, 181);
-    doc.text('Morena Tropical', 14, 20);
+    doc.text('Morena Tropical', offsetX, 20);
     doc.setFontSize(10); doc.setTextColor(120); doc.setFont('helvetica', 'normal');
-    doc.text('Moda Femenina · by Paola Rojas', 14, 26);
+    doc.text('Moda Femenina · by Paola Rojas', offsetX, 26);
     doc.setTextColor(0);
     doc.setFontSize(12); doc.text(`Factura: ${f.numero}`, 14, 40);
     doc.text(`Fecha: ${f.fecha}`, 14, 47);
@@ -1142,21 +1225,31 @@ function generarCatalogoPDF() {
     if (disponibles.length === 0) { toast('No hay stock disponible para el catálogo'); return null; }
     const { jsPDF } = window.jspdf;
     const doc = new jsPDF();
+    const offsetX = logoBase64 ? 32 : 14;
+    if (logoBase64) {
+        try { doc.addImage(logoBase64, 'PNG', 14, 8, 20, 20); } catch (e) { console.warn('No se pudo insertar el logo:', e); }
+    }
     doc.setFont('helvetica', 'bold'); doc.setFontSize(20); doc.setTextColor(139, 63, 181);
-    doc.text('Morena Tropical', 14, 20);
+    doc.text('Morena Tropical', offsetX, 18);
     doc.setFontSize(11); doc.setTextColor(120); doc.setFont('helvetica', 'normal');
-    doc.text('Catálogo de disponibilidad · ' + new Date().toLocaleDateString('es-VE'), 14, 27);
+    doc.text('Catálogo de disponibilidad · ' + new Date().toLocaleDateString('es-VE'), offsetX, 25);
     let y = 42;
+    const filaAlto = 26; // ahora más alta para dejar espacio a la foto del producto
     disponibles.forEach((p, i) => {
-        if (y > 270) { doc.addPage(); y = 20; }
+        if (y + filaAlto > 285) { doc.addPage(); y = 20; }
+        // Foto del producto (si tiene) a la izquierda de cada fila
+        if (p.imagen_url) {
+            try { doc.addImage(p.imagen_url, formatoImagenPDF(p.imagen_url), 14, y - 6, 20, 20); } catch (e) { console.warn('No se pudo insertar imagen de', p.nombre, e); }
+        }
+        const textX = p.imagen_url ? 40 : 14;
         doc.setTextColor(0); doc.setFont('helvetica', 'bold'); doc.setFontSize(12);
-        doc.text(p.nombre, 14, y);
+        doc.text(p.nombre, textX, y);
         doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.setTextColor(90);
-        doc.text(`${p.categoria || ''}  ·  Disponibles: ${p.stock}`, 14, y + 6);
+        doc.text(`${p.categoria || ''}  ·  Disponibles: ${p.stock}`, textX, y + 6);
         doc.setTextColor(139, 63, 181); doc.setFont('helvetica', 'bold');
-        doc.text(`$${fmt(p.precio_usd)}`, 170, y + 3);
-        y += 16;
-        doc.setDrawColor(230); doc.line(14, y - 6, 196, y - 6);
+        doc.text(`$${fmt(p.precio_usd)}`, 175, y + 3);
+        y += filaAlto;
+        doc.setDrawColor(230); doc.line(14, y - 8, 196, y - 8);
     });
     return doc;
 }
@@ -1166,13 +1259,23 @@ function descargarCatalogoPDF() {
     doc.save('Catalogo-Morena-Tropical.pdf');
     toast('Catálogo descargado');
 }
-function compartirCatalogoWhatsApp() {
+async function compartirCatalogoWhatsApp() {
     const doc = generarCatalogoPDF();
     if (!doc) return;
-    doc.save('Catalogo-Morena-Tropical.pdf');
-    const texto = encodeURIComponent('¡Hola! 💜 Aquí tienes nuestro catálogo actualizado de Morena Tropical con la disponibilidad de hoy. (Adjunta el PDF que se acaba de descargar)');
-    const tel = WHATSAPP_NEGOCIO ? WHATSAPP_NEGOCIO : '';
-    window.open(`https://wa.me/${tel}?text=${texto}`, '_blank');
+    const blob = doc.output('blob');
+    const file = new File([blob], 'Catalogo-Morena-Tropical.pdf', { type: 'application/pdf' });
+    const texto = '¡Hola! 💜 Aquí tienes nuestro catálogo actualizado de Morena Tropical con la disponibilidad de hoy.';
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        // Abre el selector nativo de contactos/chats y adjunta el PDF automáticamente
+        await navigator.share({ files: [file], title: 'Catálogo Morena Tropical', text: texto });
+    } else {
+        // Sin soporte de Web Share (ej. algunos navegadores de escritorio):
+        // descarga el PDF y abre WhatsApp Web sin destinatario fijo,
+        // para que la propia usuaria elija el chat y adjunte el archivo.
+        doc.save('Catalogo-Morena-Tropical.pdf');
+        toast('PDF descargado. Elige el chat en WhatsApp y adjunta el archivo.');
+        window.open(`https://wa.me/?text=${encodeURIComponent(texto)}`, '_blank');
+    }
 }
 </script>
 
