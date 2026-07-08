@@ -1,0 +1,9 @@
+{
+  "name": "morena-tropical",
+  "devDependencies": {
+    "wrangler": "^4.107.0"
+  },
+  "dependencies": {
+    "@pushforge/builder": "^2.0.5"
+  }
+}

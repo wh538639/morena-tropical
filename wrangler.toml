@@ -1,0 +1,12 @@
+name = "morena-tropical-cron"
+main = "worker.js"
+compatibility_date = "2026-07-01"
+
+[triggers]
+# Todos los días a las 13:00 UTC = 9:00 a.m. hora de Venezuela (UTC-4)
+crons = ["0 13 * * *"]
+
+# Configura el secreto con:
+#   npx wrangler secret put CRON_SECRET
+# (debe ser el mismo valor que pusiste como CRON_SECRET en las
+#  variables de entorno de tu proyecto de Cloudflare Pages)
